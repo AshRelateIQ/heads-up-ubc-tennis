@@ -1,0 +1,40 @@
+name: UBC Court Sniper
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Runs exactly at minute 0 of every hour
+  workflow_dispatch:      # Adds a "Run workflow" button for manual testing
+
+jobs:
+  run-sniper:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip' # Caches pip packages to speed up runs
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
+
+      - name: Run Scraper
+        env:
+          # Database Secrets
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          
+          # Notification Secrets
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          
+          # Optional: PerfectMind Login (Uncomment if your scraper logs in)
+          # UB_USER: ${{ secrets.UB_USER }}
+          # UB_PASS: ${{ secrets.UB_PASS }}
+        run: python scraper.py
