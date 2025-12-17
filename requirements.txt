@@ -1,0 +1,12 @@
+playwright>=1.48.0
+streamlit>=1.39.0
+streamlit-calendar>=1.4.0
+python-dotenv==1.0.1
+requests==2.31.0
+greenlet>=3.1.0
+pandas>=2.0.0
+lxml>=4.9.0
+html5lib>=1.1
+pytz>=2023.3
+supabase>=2.0.0
+

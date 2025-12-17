@@ -1,0 +1,842 @@
+import asyncio
+import json
+import math
+import os
+import re
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Callable
+
+import pytz
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+from streamlit_calendar import calendar
+
+from scraper import DATA_PATH, load_cache, save_cache, scrape_courts, get_supabase_client
+
+load_dotenv()
+
+
+def _format_readable_date(dt: datetime) -> str:
+    """Format datetime to readable format like 'Wed 12th 2025'."""
+    # Get day suffix (1st, 2nd, 3rd, 4th, etc.)
+    day = dt.day
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    
+    return dt.strftime(f"%a {day}{suffix} %Y")
+
+
+def _format_time_range(start_dt: datetime, end_dt: datetime) -> str:
+    """Format time range without repeating date if same day.
+    Example: 'Wed 12th 2025 08:00PM - 10:00PM' or 'Wed 12th 2025 08:00PM - Thu 13th 2025 10:00PM'"""
+    start_date_str = _format_readable_date(start_dt)
+    start_time_str = start_dt.strftime("%I:%M%p")
+    
+    # Check if same day
+    if start_dt.date() == end_dt.date():
+        end_time_str = end_dt.strftime("%I:%M%p")
+        return f"{start_date_str} {start_time_str} - {end_time_str}"
+    else:
+        end_date_str = _format_readable_date(end_dt)
+        end_time_str = end_dt.strftime("%I:%M%p")
+        return f"{start_date_str} {start_time_str} - {end_date_str} {end_time_str}"
+
+
+def _format_single_time(dt: datetime) -> str:
+    """Format single datetime to readable format.
+    Example: 'Wed 12th 2025 08:00PM'"""
+    date_str = _format_readable_date(dt)
+    time_str = dt.strftime("%I:%M%p")
+    return f"{date_str} {time_str}"
+
+
+def _parse_time(value: str) -> Optional[datetime]:
+    """Parse time string from various formats."""
+    if not value:
+        return None
+    
+    # Try common datetime patterns
+    patterns = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%m/%d/%Y %I:%M %p",
+        "%m-%d-%Y %I:%M %p",
+        "%d/%m/%Y %I:%M %p",
+        "%d-%m-%Y %I:%M %p",
+    ]
+    
+    for pattern in patterns:
+        try:
+            return datetime.strptime(value.strip(), pattern)
+        except ValueError:
+            continue
+    
+    # Try to extract date and time from text
+    # Look for patterns like "10:00 AM", "2:00 PM"
+    time_match = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)', value)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        am_pm = time_match.group(3).upper()
+        
+        if am_pm == "PM" and hour != 12:
+            hour += 12
+        elif am_pm == "AM" and hour == 12:
+            hour = 0
+        
+        # Use today's date as default
+        today = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return today
+    
+    return None
+
+
+def group_by_day(data: List[Dict]) -> Dict[str, List[Dict]]:
+    grouped: Dict[str, List[Dict]] = defaultdict(list)
+    for entry in data:
+        dt = _parse_time(entry.get("time", ""))
+        label = dt.strftime("%A") if dt else "Unknown Day"
+        grouped[label].append(entry)
+    return grouped
+
+
+def notify_ntfy(topic: str, message: str, base_url: str = "https://ntfy.sh") -> requests.Response:
+    url = f"{base_url.rstrip('/')}/{topic}"
+    return requests.post(url, data=message.encode("utf-8"), timeout=10)
+
+
+def get_pacific_time() -> datetime:
+    """Get current time in Pacific timezone."""
+    pacific = pytz.timezone('America/Los_Angeles')
+    return datetime.now(pacific)
+
+
+def render_countdown_clock() -> None:
+    """Render countdown clock to next hour with auto-refresh."""
+    pacific = pytz.timezone('America/Los_Angeles')
+    now = datetime.now(pacific)
+    
+    # Calculate next hour
+    next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    time_until_next_hour = next_hour - now
+    seconds_remaining = int(time_until_next_hour.total_seconds())
+    
+    # Calculate angle for clock hand (0-360 degrees, clockwise)
+    # 0 degrees = 12 o'clock, 90 degrees = 3 o'clock, etc.
+    # We want the hand to move clockwise as time expires
+    minutes_remaining = seconds_remaining / 60.0
+    angle = (60 - minutes_remaining) / 60.0 * 360.0  # 0 to 360 degrees
+    
+    # Create clock visualization with SVG for better rendering
+    clock_html = f"""
+    <div style="display: flex; align-items: center; gap: 15px; margin: 10px 0;">
+        <svg width="80" height="80" style="border: 2px solid #333; border-radius: 50%; background: #f9f9f9;">
+            <circle cx="40" cy="40" r="35" fill="none" stroke="#ddd" stroke-width="1"/>
+            <!-- Clock hand -->
+            <line x1="40" y1="40" x2="40" y2="15" 
+                  stroke="#333" stroke-width="2" 
+                  transform="rotate({angle} 40 40)" 
+                  style="transition: transform 0.5s ease;"/>
+            <!-- 12 o'clock marker -->
+            <text x="40" y="12" text-anchor="middle" font-size="10" font-weight="bold">12</text>
+        </svg>
+        <div>
+            <p style="margin: 0; font-size: 14px; font-weight: bold;">⏰ Next Auto-Refresh</p>
+            <p style="margin: 3px 0; font-size: 16px; font-weight: bold; color: #2563eb;">
+                {seconds_remaining // 60}:{seconds_remaining % 60:02d} remaining
+            </p>
+            <p style="margin: 0; font-size: 11px; color: #666;">
+                At {next_hour.strftime('%I:%M %p %Z')}
+            </p>
+        </div>
+    </div>
+    """
+    st.markdown(clock_html, unsafe_allow_html=True)
+    
+    # Auto-refresh when countdown reaches 0
+    if seconds_remaining <= 0:
+        if 'auto_refresh_triggered' not in st.session_state:
+            st.session_state['auto_refresh_triggered'] = True
+            st.rerun()
+    
+    # Auto-refresh every 30 seconds to update countdown (less frequent to avoid too many reruns)
+    if 'last_countdown_refresh' not in st.session_state:
+        st.session_state['last_countdown_refresh'] = time.time()
+    
+    if time.time() - st.session_state['last_countdown_refresh'] > 30:
+        st.session_state['last_countdown_refresh'] = time.time()
+        # Use a placeholder to trigger rerun without blocking
+        st.rerun()
+
+
+def render_hourglass_progress(progress: float, message: str, elapsed: float = 0, estimated: float = 0) -> None:
+    """Render hourglass progress bar with sand dropping effect.
+    
+    Args:
+        progress: Progress as a float between 0.0 and 1.0
+        message: Status message to display
+        elapsed: Elapsed time in seconds
+        estimated: Estimated total time in seconds
+    """
+    progress = max(0.0, min(1.0, progress))  # Clamp between 0 and 1
+    percentage = int(progress * 100)
+    
+    # Calculate sand levels
+    top_sand_level = (1 - progress) * 100  # Top empties as progress increases
+    bottom_sand_level = progress * 100  # Bottom fills as progress increases
+    
+    # Format time display
+    if estimated > 0:
+        remaining = max(0, estimated - elapsed)
+        time_display = f"{int(elapsed)}s / ~{int(estimated)}s (est. {int(remaining)}s remaining)"
+    else:
+        time_display = f"{int(elapsed)}s elapsed"
+    
+    # Create hourglass visualization with SVG for better control
+    hourglass_html = f"""
+    <div style="margin: 15px 0; padding: 15px; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd;">
+        <div style="display: flex; align-items: center; gap: 20px;">
+            <!-- Hourglass SVG -->
+            <svg width="70" height="90" viewBox="0 0 70 90">
+                <!-- Top half (emptying) -->
+                <path d="M 10 5 L 60 5 L 50 40 L 20 40 Z" 
+                      fill="none" stroke="#333" stroke-width="2"/>
+                <rect x="20" y="5" width="30" height="35" 
+                      fill="url(#sandGradientTop)" 
+                      style="clip-path: polygon(20px 5px, 50px 5px, 50px {20 + top_sand_level * 0.35}px, 20px {20 + top_sand_level * 0.35}px);"/>
+                <!-- Middle neck -->
+                <rect x="30" y="38" width="10" height="4" fill="#333"/>
+                <!-- Bottom half (filling) -->
+                <path d="M 20 42 L 50 42 L 60 85 L 10 85 Z" 
+                      fill="none" stroke="#333" stroke-width="2"/>
+                <rect x="20" y="42" width="30" height="43" 
+                      fill="url(#sandGradientBottom)" 
+                      style="clip-path: polygon(20px {42 + (1 - bottom_sand_level / 100) * 43}px, 50px {42 + (1 - bottom_sand_level / 100) * 43}px, 50px 85px, 20px 85px);"/>
+                <!-- Gradient definitions -->
+                <defs>
+                    <linearGradient id="sandGradientTop" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" style="stop-color:#D2B48C;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#8B4513;stop-opacity:1" />
+                    </linearGradient>
+                    <linearGradient id="sandGradientBottom" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" style="stop-color:#8B4513;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#D2B48C;stop-opacity:1" />
+                    </linearGradient>
+                </defs>
+            </svg>
+            <div style="flex: 1;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-weight: bold; font-size: 14px;">{message}</span>
+                    <span style="font-weight: bold; font-size: 16px; color: #2563eb;">{percentage}%</span>
+                </div>
+                <div style="width: 100%; height: 24px; background: #e0e0e0; border-radius: 12px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">
+                    <div style="width: {percentage}%; height: 100%; background: linear-gradient(90deg, #8B4513, #A0522D, #CD853F); 
+                                transition: width 0.5s ease; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                    </div>
+                </div>
+                <div style="margin-top: 6px; font-size: 12px; color: #666;">
+                    {time_display}
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(hourglass_html, unsafe_allow_html=True)
+
+
+def run_sniper_with_progress(force: bool = False, headless: bool = True, progress_placeholder=None, status_placeholder=None) -> List[Dict]:
+    """Run scraper with time-based progress updates.
+    
+    Uses estimated average scraping time to show progress based on elapsed time.
+    """
+    # Estimated average time for scraping (in seconds)
+    # This can be updated based on actual measurements
+    ESTIMATED_SCRAPING_TIME = 180  # 3 minutes default, will be updated based on actual runs
+    
+    # Get stored average time if available
+    if 'avg_scraping_time' in st.session_state:
+        ESTIMATED_SCRAPING_TIME = st.session_state['avg_scraping_time']
+    
+    progress_messages = []
+    start_time = time.time()
+    
+    def progress_callback(current, total, message, court_name=None):
+        # Store progress messages
+        progress_messages.append(f"[{current}/{total}] {message}")
+        # Update session state
+        st.session_state['scraper_progress'] = {
+            'current': current,
+            'total': total,
+            'message': message
+        }
+    
+    # Initial progress display
+    if progress_placeholder and status_placeholder:
+        with progress_placeholder.container():
+            render_hourglass_progress(0.0, "Initializing scraper...", 0, ESTIMATED_SCRAPING_TIME)
+        status_placeholder.markdown("**Status:** Starting scraper...")
+    
+    # Use threading to update progress bar while scraper runs
+    import threading
+    
+    stop_progress = threading.Event()
+    progress_thread = None
+    
+    def update_progress():
+        """Update progress bar based on elapsed time."""
+        while not stop_progress.is_set():
+            elapsed = time.time() - start_time
+            # Calculate progress based on elapsed time vs estimated time
+            # Cap at 95% until actually complete
+            progress = min(0.95, elapsed / ESTIMATED_SCRAPING_TIME) if ESTIMATED_SCRAPING_TIME > 0 else 0.5
+            
+            if progress_placeholder and status_placeholder:
+                try:
+                    current_msg = st.session_state.get('scraper_progress', {}).get('message', 'Scraping...')
+                    with progress_placeholder.container():
+                        render_hourglass_progress(progress, current_msg, elapsed, ESTIMATED_SCRAPING_TIME)
+                except Exception:
+                    pass  # Ignore errors during update
+            
+            time.sleep(0.5)  # Update every 0.5 seconds
+    
+    # Start progress update thread
+    if progress_placeholder and status_placeholder:
+        progress_thread = threading.Thread(target=update_progress, daemon=True)
+        progress_thread.start()
+    
+    # Use st.status for better progress display
+    with st.status("Scraping courts...", expanded=True) as status:
+        try:
+            # Run scraper with progress callback
+            data = asyncio.run(scrape_courts(headless=headless, progress_callback=progress_callback))
+            
+            # Stop progress updates
+            stop_progress.set()
+            if progress_thread:
+                progress_thread.join(timeout=1)
+            
+            # Calculate actual elapsed time
+            actual_elapsed = time.time() - start_time
+            
+            # Update average scraping time (exponential moving average)
+            if 'avg_scraping_time' not in st.session_state:
+                st.session_state['avg_scraping_time'] = actual_elapsed
+            else:
+                # EMA: new_avg = 0.7 * old_avg + 0.3 * new_value
+                st.session_state['avg_scraping_time'] = 0.7 * st.session_state['avg_scraping_time'] + 0.3 * actual_elapsed
+            
+            # Show all progress messages
+            for msg in progress_messages:
+                status.write(msg)
+            
+            # Update status
+            status.update(label="✅ Scraping complete!", state="complete")
+            
+            # Final progress display (100%)
+            if progress_placeholder and status_placeholder:
+                with progress_placeholder.container():
+                    render_hourglass_progress(1.0, "Scraping complete!", actual_elapsed, actual_elapsed)
+                status_placeholder.markdown(f"**Status:** ✅ Scraping complete! (took {int(actual_elapsed)}s)")
+        except Exception as e:
+            stop_progress.set()
+            if progress_thread:
+                progress_thread.join(timeout=1)
+            status.update(label=f"❌ Error: {str(e)}", state="error")
+            if progress_placeholder and status_placeholder:
+                status_placeholder.markdown(f"**Status:** ❌ Error: {str(e)}")
+            raise
+    
+    # Save cache and update last run time
+    save_cache(data, DATA_PATH)
+    pacific = pytz.timezone('America/Los_Angeles')
+    st.session_state['last_run_time'] = datetime.now(pacific).strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    
+    return data
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_scrape(headless: bool) -> List[Dict]:
+    return asyncio.run(scrape_courts(headless=headless))
+
+
+def run_sniper(force: bool = False, headless: bool = True) -> tuple[List[Dict], str]:
+    """Run scraper and return data with source indicator."""
+    if force:
+        data = cached_scrape.clear()
+        data = cached_scrape(headless)
+    else:
+        data = cached_scrape(headless)
+    save_cache(data, DATA_PATH)
+    # Update last run time
+    pacific = pytz.timezone('America/Los_Angeles')
+    st.session_state['last_run_time'] = datetime.now(pacific).strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    # Determine data source
+    data_source = 'supabase' if get_supabase_client() else 'json'
+    return data, data_source
+
+
+def render_hero(data: List[Dict]) -> None:
+    """Render the hero section with next available slot."""
+    parsed = [(item, _parse_time(item.get("time", ""))) for item in data]
+    parsed = [item for item in parsed if item[1] is not None]
+    parsed.sort(key=lambda x: x[1])
+    if parsed:
+        next_slot = parsed[0][0]
+        st.markdown(
+            f"### ✅ Next Slot Available: {next_slot['time']} ({next_slot['court']})"
+        )
+    else:
+        st.markdown("### ❌ No Slots Available")
+
+
+def find_one_hour_slots(data: List[Dict]) -> List[Dict]:
+    """Find available one-hour slots (not part of a 2-hour booking)."""
+    parsed = [(item, _parse_time(item.get("time", ""))) for item in data]
+    parsed = [item for item in parsed if item[1] is not None]
+    parsed.sort(key=lambda x: x[1])
+    
+    one_hour_slots = []
+    seen_times = set()
+    
+    for item, dt in parsed:
+        # Skip if this time is already part of a 2-hour slot
+        time_key = (dt.date(), dt.hour)
+        if time_key in seen_times:
+            continue
+        
+        # Check if the next hour is also available (making it a 2-hour slot)
+        next_hour = dt + timedelta(hours=1)
+        
+        is_two_hour = False
+        for other_item, other_dt in parsed:
+            if other_dt.date() == next_hour.date() and other_dt.hour == next_hour.hour:
+                # Check if it's the same court
+                if item['court'] == other_item['court']:
+                    is_two_hour = True
+                    seen_times.add((next_hour.date(), next_hour.hour))
+                    break
+        
+        if not is_two_hour:
+            # Format the time display
+            formatted_time = _format_single_time(dt)
+            one_hour_slots.append({
+                **item,
+                'formatted_time': formatted_time
+            })
+    
+    return one_hour_slots[:3]  # Return top 3
+
+
+def find_two_hour_slots(data: List[Dict]) -> List[Dict]:
+    """Find available two-hour slots (back-to-back 1-hour slots)."""
+    parsed = [(item, _parse_time(item.get("time", ""))) for item in data]
+    parsed = [item for item in parsed if item[1] is not None]
+    parsed.sort(key=lambda x: x[1])
+    
+    two_hour_slots = []
+    seen_pairs = set()
+    
+    for i, (item, dt) in enumerate(parsed):
+        # Check if the next hour is also available
+        next_hour = dt + timedelta(hours=1)
+        
+        # Look for a slot in the next hour on the same court
+        for j, (other_item, other_dt) in enumerate(parsed):
+            if i != j and item['court'] == other_item['court']:
+                if other_dt.date() == next_hour.date() and other_dt.hour == next_hour.hour:
+                    # Avoid duplicates
+                    pair_key = (dt, other_dt, item['court'])
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+                    
+                    # Calculate end time (add 1 hour to the second slot's time)
+                    end_time = other_dt + timedelta(hours=1)
+                    
+                    # Format the time range
+                    formatted_time = _format_time_range(dt, end_time)
+                    
+                    # Found a 2-hour slot!
+                    two_hour_slots.append({
+                        'court': item['court'],
+                        'start_time': item['time'],
+                        'end_time': other_item['time'],
+                        'formatted_time': formatted_time,
+                        'status': 'Open (2 hours)',
+                        'link': item.get('link', '#'),
+                    })
+                    break
+        
+        if len(two_hour_slots) >= 3:
+            break
+    
+    return two_hour_slots[:3]  # Return top 3
+
+
+def get_pastel_colors() -> Dict[str, str]:
+    """Get pastel color mapping for courts."""
+    # Pastel colors for individual courts (avoiding yellow for better white text contrast)
+    pastel_colors = {
+        "Court 01": "#FFB3BA",  # Pastel pink
+        "Court 02": "#BAFFC9",  # Pastel green
+        "Court 03": "#BAE1FF",  # Pastel blue
+        "Court 04": "#B4C6E7",  # Pastel periwinkle (replaced yellow)
+        "Court 05": "#FFDFBA",  # Pastel orange
+        "Court 06": "#E0BBE4",  # Pastel purple
+        "Court 07": "#FEC8C1",  # Pastel coral
+        "Court 08": "#B5EAD7",  # Pastel mint
+        "Court 09": "#C7CEEA",  # Pastel lavender
+        "Court 10": "#FFD3A5",  # Pastel peach
+        "Court 11": "#A8E6CF",  # Pastel seafoam
+        "Court 12": "#FFAAA5",  # Pastel rose
+        "Court 13": "#DDA0DD",  # Pastel plum
+    }
+    return pastel_colors
+
+
+def group_slots_by_time_block(data: List[Dict]) -> List[Dict]:
+    """Group slots by time blocks. If multiple courts are available at the same time, combine them.
+    Also detect 2-hour slots (back-to-back 1-hour slots) and combine them."""
+    parsed = [(item, _parse_time(item.get("time", ""))) for item in data]
+    parsed = [item for item in parsed if item[1] is not None]
+    parsed.sort(key=lambda x: x[1])
+    
+    # First, identify 2-hour slots (back-to-back 1-hour slots on same court)
+    two_hour_slots_list = []
+    processed_indices = set()
+    
+    for i, (item, dt) in enumerate(parsed):
+        if i in processed_indices:
+            continue
+        
+        # Check if next hour is also available on same court
+        next_hour = dt + timedelta(hours=1)
+        
+        for j, (other_item, other_dt) in enumerate(parsed):
+            if i != j and j not in processed_indices:
+                if (item['court'] == other_item['court'] and 
+                    other_dt.date() == next_hour.date() and 
+                    other_dt.hour == next_hour.hour):
+                    # Found a 2-hour slot!
+                    two_hour_slots_list.append({
+                        'start': dt,
+                        'end': other_dt + timedelta(hours=1),
+                        'court': item['court'],
+                        'start_time_str': item['time'],
+                        'end_time_str': other_item['time'],
+                        'link': item.get('link', '#'),
+                    })
+                    processed_indices.add(i)
+                    processed_indices.add(j)
+                    break
+    
+    # Group 2-hour slots by time block (same start time, different courts)
+    two_hour_time_blocks = defaultdict(list)
+    for slot in two_hour_slots_list:
+        block_key = (slot['start'].date(), slot['start'].hour)
+        two_hour_time_blocks[block_key].append(slot)
+    
+    # Now group remaining slots by time (same time, different courts)
+    time_blocks = defaultdict(list)
+    
+    for i, (item, dt) in enumerate(parsed):
+        if i in processed_indices:
+            continue
+        
+        # Group by date and hour
+        block_key = (dt.date(), dt.hour)
+        time_blocks[block_key].append(item)
+    
+    # Create calendar events
+    events = []
+    
+    # Add grouped 2-hour slots
+    for (date, hour), slots in two_hour_time_blocks.items():
+        courts = sorted([slot['court'] for slot in slots], key=lambda x: int(re.search(r'\d+', x).group()))
+        court_nums = [c.split()[-1] for c in courts]
+        
+        # Use first slot's times (all should have same start/end since they're grouped by time)
+        first_slot = slots[0]
+        start_str = first_slot['start'].strftime('%Y-%m-%dT%H:%M:%S')
+        end_str = first_slot['end'].strftime('%Y-%m-%dT%H:%M:%S')
+        
+        # Create title
+        if len(courts) == 1:
+            title = f"Court {court_nums[0]}"
+        else:
+            title = f"Courts {', '.join(court_nums)}"
+        
+        events.append({
+            'title': title,
+            'start': start_str,
+            'end': end_str,
+            'resourceId': courts[0] if len(courts) == 1 else 'Multiple',
+            'extendedProps': {
+                'courts': courts,
+                'isTwoHour': True,
+                'link': first_slot['link'],
+            }
+        })
+    
+    # Add grouped 1-hour slots
+    for (date, hour), items in time_blocks.items():
+        courts = sorted([item['court'] for item in items], key=lambda x: int(re.search(r'\d+', x).group()))
+        court_nums = [c.split()[-1] for c in courts]
+        
+        # Create title
+        if len(courts) == 1:
+            title = f"Court {court_nums[0]}"
+        else:
+            title = f"Courts {', '.join(court_nums)}"
+        
+        # Use first item's time for start
+        start_dt = _parse_time(items[0]['time'])
+        if start_dt is None:
+            continue
+        end_dt = start_dt + timedelta(hours=1)
+        
+        # Format dates for FullCalendar
+        start_str = start_dt.strftime('%Y-%m-%dT%H:%M:%S')
+        end_str = end_dt.strftime('%Y-%m-%dT%H:%M:%S')
+        
+        events.append({
+            'title': title,
+            'start': start_str,
+            'end': end_str,
+            'resourceId': courts[0] if len(courts) == 1 else 'Multiple',
+            'extendedProps': {
+                'courts': courts,
+                'isTwoHour': False,
+                'link': items[0].get('link', '#'),
+            }
+        })
+    
+    return events
+
+
+def render_calendar_view(data: List[Dict]) -> None:
+    """Render calendar view with grouped time blocks."""
+    events = group_slots_by_time_block(data)
+    
+    if not events:
+        st.info("No slots available to display")
+        return
+    
+    # Get color mapping
+    color_map = get_pastel_colors()
+    multi_court_color = "#D3D3D3"  # Light gray for multiple courts (1-hour)
+    two_hour_multi_color = "#FFA500"  # Orange for multiple 2-hour slots (1-hour)
+    two_hour_multi_color = "#FFA500"  # Orange for multiple 2-hour slots
+    
+    # Configure calendar
+    calendar_options = {
+        "headerToolbar": {
+            "left": "prev,next today",
+            "center": "title",
+            "right": "dayGridMonth,timeGridWeek,timeGridDay,listWeek",
+        },
+        "initialView": "timeGridWeek",
+        "slotMinTime": "08:00:00",
+        "slotMaxTime": "23:00:00",
+        "height": "auto",
+        "editable": False,
+        "selectable": False,
+    }
+    
+    # Add colors to events
+    for event in events:
+        courts = event['extendedProps']['courts']
+        is_two_hour = event['extendedProps'].get('isTwoHour', False)
+        
+        if is_two_hour:
+            # 2-hour slots: single court uses pastel color, multiple courts use special color
+            if len(courts) == 1:
+                # Single court 2-hour slots use the same pastel color as individual courts
+                event['backgroundColor'] = color_map.get(courts[0], "#CCCCCC")
+                event['borderColor'] = color_map.get(courts[0], "#CCCCCC")
+            else:
+                # Multiple court 2-hour slots use special color
+                event['backgroundColor'] = two_hour_multi_color
+                event['borderColor'] = two_hour_multi_color
+        else:
+            # 1-hour slots use regular colors
+            if len(courts) == 1:
+                event['backgroundColor'] = color_map.get(courts[0], "#CCCCCC")
+                event['borderColor'] = color_map.get(courts[0], "#CCCCCC")
+            else:
+                event['backgroundColor'] = multi_court_color
+                event['borderColor'] = multi_court_color
+    
+    # Render calendar
+    calendar_events = calendar(events=events, options=calendar_options, key="tennis_calendar")
+    
+    # Add legend
+    st.markdown("### Color Legend")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**1-Hour Slots:**")
+        st.markdown("Individual Courts:")
+        for court, color in sorted(color_map.items(), key=lambda x: int(re.search(r'\d+', x[0]).group())):
+            st.markdown(f'<div style="display: inline-block; width: 20px; height: 20px; background-color: {color}; border: 1px solid #ccc; margin-right: 5px; vertical-align: middle;"></div> {court}', unsafe_allow_html=True)
+        st.markdown(f'<div style="display: inline-block; width: 20px; height: 20px; background-color: {multi_court_color}; border: 1px solid #ccc; margin-right: 5px; vertical-align: middle;"></div> Multiple Courts', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("**2-Hour Slots:**")
+        st.markdown("Single court 2-hour slots use the same pastel colors as individual courts")
+        st.markdown(f'<div style="display: inline-block; width: 20px; height: 20px; background-color: {two_hour_multi_color}; border: 1px solid #ccc; margin-right: 5px; vertical-align: middle;"></div> Multiple Courts (2 hours)', unsafe_allow_html=True)
+        st.markdown("💡 **2-hour slots** are shown as longer blocks covering 2 consecutive hours")
+
+
+def render_feed(data: List[Dict], notifications_enabled: bool, topic: str, ntfy_url: str) -> None:
+    grouped = group_by_day(data)
+    for day, entries in grouped.items():
+        st.subheader(day)
+        for entry in entries:
+            label = f"Book {entry['court']} @ {entry['time']}"
+            link = entry.get("link") or "#"
+            st.link_button(label, link, use_container_width=True)
+            if notifications_enabled and topic:
+                st.caption(f"Alert sent to ntfy topic '{topic}' when refreshed.")
+
+
+def main() -> None:
+    st.set_page_config(page_title="UBC Tennis Court Sniper", layout="wide")
+    st.title("🎾 UBC Tennis Court Sniper")
+
+    sidebar = st.sidebar
+    sidebar.header("Automation")
+    ntfy_enabled = sidebar.checkbox("Enable Ntfy Notifications", value=False)
+    ntfy_topic = sidebar.text_input("ntfy topic", value=os.getenv("NTFY_TOPIC", ""))
+    ntfy_url = sidebar.text_input("ntfy base URL", value=os.getenv("NTFY_URL", "https://ntfy.sh"))
+    headless_default = os.getenv("SCRAPER_HEADLESS", "true").lower() == "true"
+    
+    # Initialize session state
+    if 'last_run_time' not in st.session_state:
+        st.session_state['last_run_time'] = None
+    if 'is_scraping' not in st.session_state:
+        st.session_state['is_scraping'] = False
+
+    if ntfy_enabled and ntfy_topic:
+        if "ntfy_log" not in st.session_state:
+            st.session_state["ntfy_log"] = []
+    else:
+        st.session_state.pop("ntfy_log", None)
+
+    # Display last run time
+    if st.session_state.get('last_run_time'):
+        pacific = pytz.timezone('America/Los_Angeles')
+        now = datetime.now(pacific)
+        sidebar.markdown("---")
+        sidebar.markdown(f"**Last Scraped:**\n{st.session_state['last_run_time']}")
+        sidebar.markdown(f"**Current Time (PT):**\n{now.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
+    
+    # Countdown clock
+    sidebar.markdown("---")
+    sidebar.markdown("### ⏰ Auto-Refresh")
+    render_countdown_clock()
+
+    data, data_source = load_cache()
+    is_refreshing = False
+    
+    # Display data source indicator
+    if data_source == 'supabase':
+        sidebar.markdown("---")
+        sidebar.success("✅ Connected to Supabase")
+    elif data_source == 'json':
+        sidebar.markdown("---")
+        sidebar.warning("⚠️ Using JSON file (Supabase unavailable)")
+    else:
+        sidebar.markdown("---")
+        sidebar.error("❌ No data available")
+    
+    if st.button("Refresh Now", disabled=st.session_state.get('is_scraping', False)):
+        st.session_state['is_scraping'] = True
+        is_refreshing = True
+        
+        # Create placeholders for progress
+        progress_placeholder = st.empty()
+        status_placeholder = st.empty()
+        
+        try:
+            data = run_sniper_with_progress(
+                force=True, 
+                headless=headless_default,
+                progress_placeholder=progress_placeholder,
+                status_placeholder=status_placeholder
+            )
+            
+            # Reload data to get updated source after scraping
+            data, data_source = load_cache()
+            
+            # Clear progress placeholders
+            progress_placeholder.empty()
+            status_placeholder.empty()
+            
+            if ntfy_enabled and ntfy_topic and data:
+                message = f"Next slot: {data[0].get('time')} @ {data[0].get('court')}"
+                try:
+                    resp = notify_ntfy(ntfy_topic, message, ntfy_url)
+                    st.session_state["ntfy_log"].append(f"{datetime.utcnow().isoformat()}Z: {message} ({resp.status_code})")
+                except Exception as exc:  # pragma: no cover - defensive
+                    st.warning(f"Failed to send notification: {exc}")
+        finally:
+            st.session_state['is_scraping'] = False
+            st.rerun()
+    elif not data:
+        data, data_source = run_sniper(force=False, headless=headless_default)
+
+    render_hero(data)
+    
+    # Next 3 one-hour slots
+    st.markdown("---")
+    st.subheader("⏰ Next 3 One-Hour Slots")
+    one_hour_slots = find_one_hour_slots(data)
+    if one_hour_slots:
+        for slot in one_hour_slots:
+            # Use formatted_time if available, otherwise fall back to original time
+            time_display = slot.get('formatted_time', slot.get('time', ''))
+            label = f"Book {slot['court']} @ {time_display}"
+            link = slot.get("link") or "#"
+            st.link_button(label, link, use_container_width=True)
+    else:
+        st.info("No one-hour slots available")
+    
+    # Next 3 two-hour slots
+    st.markdown("---")
+    st.subheader("⏰⏰ Next 3 Two-Hour Slots")
+    two_hour_slots = find_two_hour_slots(data)
+    if two_hour_slots:
+        for slot in two_hour_slots:
+            # Use formatted_time if available, otherwise fall back to original time
+            time_display = slot.get('formatted_time', slot.get('time', ''))
+            label = f"Book {slot['court']} @ {time_display}"
+            link = slot.get("link") or "#"
+            st.link_button(label, link, use_container_width=True)
+    else:
+        st.info("No two-hour slots available")
+    
+    # Calendar view
+    st.markdown("---")
+    st.subheader("📅 Calendar View")
+    render_calendar_view(data)
+    
+    # Full feed (collapsible)
+    with st.expander("📋 List View (All Available Slots)"):
+        render_feed(data, ntfy_enabled, ntfy_topic, ntfy_url)
+
+    if ntfy_enabled and st.session_state.get("ntfy_log"):
+        st.sidebar.subheader("Notification Log")
+        for item in st.session_state["ntfy_log"][-10:][::-1]:
+            st.sidebar.write(item)
+
+
+if __name__ == "__main__":
+    main()
+
