@@ -584,7 +584,7 @@ async def _scrape_court_schedule(page: Page, court_name: str) -> List[Dict]:
 
 async def scrape_courts(
     *,
-    headless: bool = False,
+    headless: bool = True,
     base_url: str = DEFAULT_URL,
     court_names: Optional[List[str]] = None,
     days: int = 7,
