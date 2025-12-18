@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Callable
 import pandas as pd
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 import pytz
+import requests
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -1409,6 +1410,91 @@ def load_cache(path: Path = DATA_PATH) -> tuple[List[Dict], str]:
     return [], 'none'
 
 
+def process_notifications(new_slots: List[Dict]) -> None:
+    """Process notifications for matching subscriptions.
+    
+    Args:
+        new_slots: List of dictionaries with scraped court slot data
+    """
+    supabase = get_supabase_client()
+    if not supabase:
+        logging.warning("Supabase client not available, skipping notifications")
+        return
+    
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        logging.warning("BOT_TOKEN not set, skipping notifications")
+        return
+    
+    try:
+        # Fetch all subscriptions
+        response = supabase.table('subscriptions').select("*").execute()
+        subscriptions = response.data if response.data else []
+        
+        if not subscriptions:
+            logging.debug("No subscriptions found, skipping notifications")
+            return
+        
+        logging.info(f"Processing notifications for {len(subscriptions)} subscriptions and {len(new_slots)} slots")
+        
+        # Process each slot
+        for slot in new_slots:
+            time_str = slot.get('time', '')
+            if not time_str:
+                continue
+            
+            # Parse time string to datetime
+            dt_object = None
+            time_formats = [
+                "%Y-%m-%d %I:%M %p",  # "2025-12-18 08:00 AM"
+                "%Y-%m-%d %H:%M",     # "2025-12-18 08:00"
+            ]
+            
+            for fmt in time_formats:
+                try:
+                    dt_object = datetime.strptime(time_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            
+            if dt_object is None:
+                continue
+            
+            # Extract day name and hour (local time, no timezone conversion)
+            day_name = dt_object.strftime("%A")  # Monday, Tuesday, etc.
+            hour = dt_object.hour  # 0-23
+            
+            # Check against each subscription
+            for sub in subscriptions:
+                sub_day = sub.get('day_of_week', '')
+                start_hour = sub.get('start_hour', 0)
+                end_hour = sub.get('end_hour', 23)
+                chat_id = sub.get('chat_id', '')
+                
+                # Check if day matches and hour is within range
+                if day_name == sub_day and start_hour <= hour <= end_hour:
+                    # Match found! Send Telegram notification
+                    try:
+                        message = f"🎾 *Match Found!*\n\n{slot.get('court', 'Court')} is available {day_name} at {time_str}.\n{slot.get('link', '#')}"
+                        
+                        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                        payload = {
+                            'chat_id': chat_id,
+                            'text': message,
+                            'parse_mode': 'Markdown'
+                        }
+                        
+                        response = requests.post(url, json=payload, timeout=10)
+                        response.raise_for_status()
+                        
+                        logging.info(f"Sent notification to chat_id {chat_id} for {slot.get('court')} at {time_str}")
+                    except Exception as e:
+                        logging.error(f"Failed to send notification to chat_id {chat_id}: {e}")
+    
+    except Exception as e:
+        logging.error(f"Error processing notifications: {e}")
+
+
 def save_cache(data: List[Dict], path: Path = DATA_PATH) -> None:
     """Save cache to both JSON file (backup) and Supabase."""
     # Always save to JSON file as backup
@@ -1417,6 +1503,9 @@ def save_cache(data: List[Dict], path: Path = DATA_PATH) -> None:
     
     # Also save to Supabase
     clean_and_upload_to_supabase(data)
+    
+    # Process notifications after saving
+    process_notifications(data)
 
 
 async def main(court_names: Optional[List[str]] = None) -> None:

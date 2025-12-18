@@ -694,6 +694,119 @@ def render_calendar_view(data: List[Dict]) -> None:
         st.markdown("💡 **2-hour slots** are shown as longer blocks covering 2 consecutive hours")
 
 
+def render_alerts_section() -> None:
+    """Render the alerts/subscriptions section with form and subscription list."""
+    supabase = get_supabase_client()
+    if not supabase:
+        st.warning("⚠️ Supabase not available. Alerts require Supabase connection.")
+        return
+    
+    # Initialize chat_id in session state if not present
+    if 'alert_chat_id' not in st.session_state:
+        st.session_state['alert_chat_id'] = ""
+    
+    # Form to add new subscription
+    with st.form("add_subscription_form"):
+        st.markdown("### Add New Alert")
+        chat_id = st.text_input("Chat ID", value=st.session_state['alert_chat_id'], help="Your Telegram chat ID")
+        day_of_week = st.selectbox(
+            "Day of Week",
+            options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            start_hour = st.number_input("Start Hour", min_value=0, max_value=23, value=8, step=1, help="Hour in 24-hour format (0-23)")
+        with col2:
+            end_hour = st.number_input("End Hour", min_value=0, max_value=23, value=22, step=1, help="Hour in 24-hour format (0-23)")
+        
+        submitted = st.form_submit_button("Add Alert")
+        
+        if submitted:
+            if not chat_id:
+                st.error("Please enter a Chat ID")
+            elif start_hour > end_hour:
+                st.error("Start hour must be less than or equal to end hour")
+            else:
+                try:
+                    # Store chat_id in session state
+                    st.session_state['alert_chat_id'] = chat_id
+                    
+                    # Insert subscription into Supabase
+                    response = supabase.table('subscriptions').insert({
+                        'chat_id': chat_id,
+                        'day_of_week': day_of_week,
+                        'start_hour': start_hour,
+                        'end_hour': end_hour
+                    }).execute()
+                    
+                    st.success(f"✅ Alert added successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to add alert: {e}")
+    
+    # Display current subscriptions
+    st.markdown("### My Alerts")
+    
+    # Search box for Chat ID
+    col_search1, col_search2 = st.columns([3, 1])
+    with col_search1:
+        search_chat_id = st.text_input("Search by Chat ID", key="search_chat_id", placeholder="Enter your Telegram Chat ID", help="Enter your Chat ID to view and manage your alerts")
+    with col_search2:
+        search_button = st.button("Search", key="search_alerts_button", use_container_width=True)
+    
+    # Initialize search result in session state
+    if 'searched_chat_id' not in st.session_state:
+        st.session_state['searched_chat_id'] = None
+    
+    # Update searched_chat_id when search button is clicked
+    if search_button:
+        if search_chat_id:
+            st.session_state['searched_chat_id'] = search_chat_id
+        else:
+            st.warning("Please enter a Chat ID to search")
+            st.session_state['searched_chat_id'] = None
+    
+    # Get the chat_id to filter by (from search)
+    chat_id_filter = st.session_state.get('searched_chat_id', None)
+    
+    if chat_id_filter:
+        try:
+            # Fetch subscriptions for this chat_id
+            response = supabase.table('subscriptions').select("*").eq('chat_id', chat_id_filter).execute()
+            
+            if response.data and len(response.data) > 0:
+                st.success(f"Found {len(response.data)} alert(s) for Chat ID: {chat_id_filter}")
+                for sub in response.data:
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    with col1:
+                        st.write(f"**{sub['day_of_week']}** {sub['start_hour']:02d}:00 - {sub['end_hour']:02d}:00")
+                    with col2:
+                        # Delete button
+                        sub_id = sub.get('id') or f"{sub['chat_id']}_{sub['day_of_week']}_{sub['start_hour']}_{sub['end_hour']}"
+                        if st.button("Delete", key=f"delete_{sub_id}"):
+                            try:
+                                # Try to delete by id first, then by all fields
+                                if 'id' in sub:
+                                    delete_response = supabase.table('subscriptions').delete().eq('id', sub['id']).execute()
+                                else:
+                                    # Delete by matching all fields
+                                    delete_response = supabase.table('subscriptions').delete().eq('chat_id', sub['chat_id']).eq('day_of_week', sub['day_of_week']).eq('start_hour', sub['start_hour']).eq('end_hour', sub['end_hour']).execute()
+                                st.success("✅ Alert deleted!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to delete alert: {e}")
+                    with col3:
+                        st.write("")  # Spacer
+            else:
+                st.info(f"No alerts found for Chat ID: {chat_id_filter}")
+        except Exception as e:
+            st.error(f"Failed to load alerts: {e}")
+    elif search_button and not search_chat_id:
+        st.info("Please enter a Chat ID and click Search to view alerts.")
+    elif not chat_id_filter:
+        st.info("Enter a Chat ID above and click Search to view and manage your alerts.")
+
+
 def render_feed(data: List[Dict], notifications_enabled: bool, topic: str, ntfy_url: str) -> None:
     grouped = group_by_day(data)
     for day, entries in grouped.items():
@@ -835,6 +948,11 @@ def main() -> None:
         st.sidebar.subheader("Notification Log")
         for item in st.session_state["ntfy_log"][-10:][::-1]:
             st.sidebar.write(item)
+    
+    # Alerts section
+    st.markdown("---")
+    st.subheader("🔔 Alerts")
+    render_alerts_section()
 
 
 if __name__ == "__main__":
