@@ -4,7 +4,7 @@
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,9 +12,13 @@ from supabase import create_client, Client
 
 load_dotenv()
 
-# Supabase credentials
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mzwkpzsepmvwegsxnala.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16d2twenNlcG12d2Vnc3huYWxhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTkzNTIzNCwiZXhwIjoyMDgxNTExMjM0fQ.xITF8T3RjMWZYJfxb8vH8lOqrJOuVNrfIts6sLaEkqI")
+# Supabase credentials from environment variables
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("Error: SUPABASE_URL and SUPABASE_KEY must be set in environment variables or .env file")
+    sys.exit(1)
 
 DATA_PATH = Path(__file__).parent / "court_data.json"
 
@@ -56,7 +60,7 @@ def clean_and_upload(json_data: list) -> None:
             "status": item.get('status', ''),
             "booking_link": item.get('link', ''),
             "raw_text": item.get('raw_text', ''),
-            "updated_at": datetime.now(datetime.timezone.utc).isoformat()  # Mark when we last saw it
+            "updated_at": datetime.now(timezone.utc).isoformat()  # Mark when we last saw it
         }
         clean_rows.append(row)
     
