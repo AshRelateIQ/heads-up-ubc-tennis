@@ -1282,6 +1282,7 @@ def get_supabase_client() -> Optional[Client]:
 def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
     """Clean and upload JSON data to Supabase.
     
+    Truncates the table and inserts all new data in one shot.
     Returns True if successful, False otherwise.
     """
     supabase = get_supabase_client()
@@ -1291,6 +1292,7 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
     
     try:
         clean_rows = []
+        vancouver_tz = pytz.timezone('America/Vancouver')
         
         for item in json_data:
             # Parse time string to datetime
@@ -1308,6 +1310,8 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
             for fmt in time_formats:
                 try:
                     dt_object = datetime.strptime(time_str, fmt)
+                    # Localize to Vancouver timezone
+                    dt_object = vancouver_tz.localize(dt_object)
                     break
                 except ValueError:
                     continue
@@ -1327,17 +1331,24 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
             }
             clean_rows.append(row)
         
+        # Step 1: Truncate the table (delete all existing rows)
+        try:
+            # Delete all rows by using a condition that matches all rows
+            # Using .gte() with a very old date that will match all rows
+            old_date = datetime(1970, 1, 1, tzinfo=vancouver_tz).isoformat()
+            delete_response = supabase.table('court_slots').delete().gte('start_time', old_date).execute()
+            logging.info("Truncated court_slots table")
+        except Exception as e:
+            logging.warning(f"Failed to truncate table: {e}. Proceeding with insert anyway.")
+        
         if not clean_rows:
             logging.warning("No rows to upload to Supabase")
             return False
         
-        # Upsert (The on_conflict parameter uses the unique constraint on court_name, start_time)
-        response = supabase.table('court_slots').upsert(
-            clean_rows,
-            on_conflict='court_name,start_time'
-        ).execute()
+        # Step 2: Insert all new data
+        response = supabase.table('court_slots').insert(clean_rows).execute()
         
-        logging.info(f"Synced {len(clean_rows)} slots to Supabase.")
+        logging.info(f"Inserted {len(clean_rows)} slots to Supabase (table was truncated first).")
         return True
         
     except Exception as e:
