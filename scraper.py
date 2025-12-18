@@ -1292,7 +1292,6 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
     
     try:
         clean_rows = []
-        vancouver_tz = pytz.timezone('America/Vancouver')
         
         for item in json_data:
             # Parse time string to datetime
@@ -1310,8 +1309,6 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
             for fmt in time_formats:
                 try:
                     dt_object = datetime.strptime(time_str, fmt)
-                    # Localize to Vancouver timezone
-                    dt_object = vancouver_tz.localize(dt_object)
                     break
                 except ValueError:
                     continue
@@ -1335,7 +1332,7 @@ def clean_and_upload_to_supabase(json_data: List[Dict]) -> bool:
         try:
             # Delete all rows by using a condition that matches all rows
             # Using .gte() with a very old date that will match all rows
-            old_date = datetime(1970, 1, 1, tzinfo=vancouver_tz).isoformat()
+            old_date = datetime(1970, 1, 1).isoformat()
             delete_response = supabase.table('court_slots').delete().gte('start_time', old_date).execute()
             logging.info("Truncated court_slots table")
         except Exception as e:
