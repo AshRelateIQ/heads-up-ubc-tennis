@@ -1437,7 +1437,8 @@ def process_notifications(new_slots: List[Dict]) -> None:
         
         logging.info(f"Processing notifications for {len(subscriptions)} subscriptions and {len(new_slots)} slots")
         
-        # Process each slot
+        # Parse all slots with datetime
+        parsed_slots = []
         for slot in new_slots:
             time_str = slot.get('time', '')
             if not time_str:
@@ -1460,36 +1461,113 @@ def process_notifications(new_slots: List[Dict]) -> None:
             if dt_object is None:
                 continue
             
-            # Extract day name and hour (local time, no timezone conversion)
-            day_name = dt_object.strftime("%A")  # Monday, Tuesday, etc.
-            hour = dt_object.hour  # 0-23
+            parsed_slots.append({
+                'slot': slot,
+                'dt': dt_object,
+                'day_name': dt_object.strftime("%A"),
+                'hour': dt_object.hour
+            })
+        
+        # Process each subscription
+        for sub in subscriptions:
+            sub_day = sub.get('day_of_week', '')
+            start_hour = sub.get('start_hour', 0)
+            end_hour = sub.get('end_hour', 23)
+            chat_id = sub.get('chat_id', '')
             
-            # Check against each subscription
-            for sub in subscriptions:
-                sub_day = sub.get('day_of_week', '')
-                start_hour = sub.get('start_hour', 0)
-                end_hour = sub.get('end_hour', 23)
-                chat_id = sub.get('chat_id', '')
+            # Find all matching slots for this subscription
+            matching_slots = []
+            for parsed in parsed_slots:
+                if parsed['day_name'] == sub_day and start_hour <= parsed['hour'] <= end_hour:
+                    matching_slots.append(parsed)
+            
+            if not matching_slots:
+                continue
+            
+            # Detect 2-hour slots (back-to-back hours on same court)
+            two_hour_slots = []
+            one_hour_slots = []
+            processed_indices = set()
+            
+            for i, parsed1 in enumerate(matching_slots):
+                if i in processed_indices:
+                    continue
                 
-                # Check if day matches and hour is within range
-                if day_name == sub_day and start_hour <= hour <= end_hour:
-                    # Match found! Send Telegram notification
-                    try:
-                        message = f"🎾 *Match Found!*\n\n{slot.get('court', 'Court')} is available {day_name} at {time_str}.\n{slot.get('link', '#')}"
+                slot1 = parsed1['slot']
+                dt1 = parsed1['dt']
+                court1 = slot1.get('court', '')
+                
+                # Check if next hour is also available on same court
+                next_hour = dt1 + timedelta(hours=1)
+                found_two_hour = False
+                
+                for j, parsed2 in enumerate(matching_slots):
+                    if i != j and j not in processed_indices:
+                        slot2 = parsed2['slot']
+                        dt2 = parsed2['dt']
+                        court2 = slot2.get('court', '')
                         
-                        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                        payload = {
-                            'chat_id': chat_id,
-                            'text': message,
-                            'parse_mode': 'Markdown'
-                        }
-                        
-                        response = requests.post(url, json=payload, timeout=10)
-                        response.raise_for_status()
-                        
-                        logging.info(f"Sent notification to chat_id {chat_id} for {slot.get('court')} at {time_str}")
-                    except Exception as e:
-                        logging.error(f"Failed to send notification to chat_id {chat_id}: {e}")
+                        if (court1 == court2 and 
+                            dt2.date() == next_hour.date() and 
+                            dt2.hour == next_hour.hour):
+                            # Found a 2-hour slot!
+                            end_time = dt2 + timedelta(hours=1)
+                            two_hour_slots.append({
+                                'court': court1,
+                                'start_time': dt1,
+                                'end_time': end_time
+                            })
+                            processed_indices.add(i)
+                            processed_indices.add(j)
+                            found_two_hour = True
+                            break
+                
+                if not found_two_hour:
+                    one_hour_slots.append({
+                        'slot': slot1,
+                        'dt': dt1,
+                        'court': court1
+                    })
+            
+            # Build message
+            if not two_hour_slots and not one_hour_slots:
+                continue
+            
+            message_parts = ["🎾 *Match Found!*\n"]
+            
+            # Add 2-hour slots
+            if two_hour_slots:
+                message_parts.append("*2-Hour Slots:*\n")
+                for slot in two_hour_slots:
+                    start_str = slot['start_time'].strftime("%Y-%m-%d %I:%M %p")
+                    end_str = slot['end_time'].strftime("%I:%M %p")
+                    message_parts.append(f"• {slot['court']}: {start_str} - {end_str}\n")
+                message_parts.append("\n")
+            
+            # Add 1-hour slots
+            if one_hour_slots:
+                message_parts.append("*1-Hour Slots:*\n")
+                for slot in one_hour_slots:
+                    time_str = slot['dt'].strftime("%Y-%m-%d %I:%M %p")
+                    message_parts.append(f"• {slot['court']}: {time_str}\n")
+            
+            # Send notification
+            try:
+                message = "".join(message_parts)
+                
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    'chat_id': chat_id,
+                    'text': message,
+                    'parse_mode': 'Markdown'
+                }
+                
+                response = requests.post(url, json=payload, timeout=10)
+                response.raise_for_status()
+                
+                logging.info(f"Sent notification to chat_id {chat_id} with {len(two_hour_slots)} two-hour and {len(one_hour_slots)} one-hour slots")
+            except Exception as e:
+                logging.error(f"Failed to send notification to chat_id {chat_id}: {e}")
     
     except Exception as e:
         logging.error(f"Error processing notifications: {e}")
