@@ -1,9 +1,7 @@
 import asyncio
 import json
-import math
 import os
 import re
-import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Callable
@@ -111,271 +109,26 @@ def notify_ntfy(topic: str, message: str, base_url: str = "https://ntfy.sh") -> 
 
 
 def get_pacific_time() -> datetime:
-    """Get current time in Pacific timezone."""
-    pacific = pytz.timezone('America/Los_Angeles')
+    """Get current time in Pacific timezone (America/Vancouver)."""
+    pacific = pytz.timezone('America/Vancouver')
     return datetime.now(pacific)
 
 
-def render_countdown_clock() -> None:
-    """Render countdown clock to next hour with auto-refresh."""
-    pacific = pytz.timezone('America/Los_Angeles')
-    now = datetime.now(pacific)
-    
-    # Calculate next hour
-    next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-    time_until_next_hour = next_hour - now
-    seconds_remaining = int(time_until_next_hour.total_seconds())
-    
-    # Calculate angle for clock hand (0-360 degrees, clockwise)
-    # 0 degrees = 12 o'clock, 90 degrees = 3 o'clock, etc.
-    # We want the hand to move clockwise as time expires
-    minutes_remaining = seconds_remaining / 60.0
-    angle = (60 - minutes_remaining) / 60.0 * 360.0  # 0 to 360 degrees
-    
-    # Create clock visualization with SVG for better rendering
-    clock_html = f"""
-    <div style="display: flex; align-items: center; gap: 15px; margin: 10px 0;">
-        <svg width="80" height="80" style="border: 2px solid #333; border-radius: 50%; background: #f9f9f9;">
-            <circle cx="40" cy="40" r="35" fill="none" stroke="#ddd" stroke-width="1"/>
-            <!-- Clock hand -->
-            <line x1="40" y1="40" x2="40" y2="15" 
-                  stroke="#333" stroke-width="2" 
-                  transform="rotate({angle} 40 40)" 
-                  style="transition: transform 0.5s ease;"/>
-            <!-- 12 o'clock marker -->
-            <text x="40" y="12" text-anchor="middle" font-size="10" font-weight="bold">12</text>
-        </svg>
-        <div>
-            <p style="margin: 0; font-size: 14px; font-weight: bold;">⏰ Next Auto-Refresh</p>
-            <p style="margin: 3px 0; font-size: 16px; font-weight: bold; color: #2563eb;">
-                {seconds_remaining // 60}:{seconds_remaining % 60:02d} remaining
-            </p>
-            <p style="margin: 0; font-size: 11px; color: #666;">
-                At {next_hour.strftime('%I:%M %p %Z')}
-            </p>
-        </div>
-    </div>
-    """
-    st.markdown(clock_html, unsafe_allow_html=True)
-    
-    # Auto-refresh when countdown reaches 0
-    if seconds_remaining <= 0:
-        if 'auto_refresh_triggered' not in st.session_state:
-            st.session_state['auto_refresh_triggered'] = True
-            st.rerun()
-    
-    # Auto-refresh every 30 seconds to update countdown (less frequent to avoid too many reruns)
-    if 'last_countdown_refresh' not in st.session_state:
-        st.session_state['last_countdown_refresh'] = time.time()
-    
-    if time.time() - st.session_state['last_countdown_refresh'] > 30:
-        st.session_state['last_countdown_refresh'] = time.time()
-        # Use a placeholder to trigger rerun without blocking
-        st.rerun()
 
 
-def render_hourglass_progress(progress: float, message: str, elapsed: float = 0, estimated: float = 0) -> None:
-    """Render hourglass progress bar with sand dropping effect.
-    
-    Args:
-        progress: Progress as a float between 0.0 and 1.0
-        message: Status message to display
-        elapsed: Elapsed time in seconds
-        estimated: Estimated total time in seconds
-    """
-    progress = max(0.0, min(1.0, progress))  # Clamp between 0 and 1
-    percentage = int(progress * 100)
-    
-    # Calculate sand levels
-    top_sand_level = (1 - progress) * 100  # Top empties as progress increases
-    bottom_sand_level = progress * 100  # Bottom fills as progress increases
-    
-    # Format time display
-    if estimated > 0:
-        remaining = max(0, estimated - elapsed)
-        time_display = f"{int(elapsed)}s / ~{int(estimated)}s (est. {int(remaining)}s remaining)"
-    else:
-        time_display = f"{int(elapsed)}s elapsed"
-    
-    # Create hourglass visualization with SVG for better control
-    hourglass_html = f"""
-    <div style="margin: 15px 0; padding: 15px; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd;">
-        <div style="display: flex; align-items: center; gap: 20px;">
-            <!-- Hourglass SVG -->
-            <svg width="70" height="90" viewBox="0 0 70 90">
-                <!-- Top half (emptying) -->
-                <path d="M 10 5 L 60 5 L 50 40 L 20 40 Z" 
-                      fill="none" stroke="#333" stroke-width="2"/>
-                <rect x="20" y="5" width="30" height="35" 
-                      fill="url(#sandGradientTop)" 
-                      style="clip-path: polygon(20px 5px, 50px 5px, 50px {20 + top_sand_level * 0.35}px, 20px {20 + top_sand_level * 0.35}px);"/>
-                <!-- Middle neck -->
-                <rect x="30" y="38" width="10" height="4" fill="#333"/>
-                <!-- Bottom half (filling) -->
-                <path d="M 20 42 L 50 42 L 60 85 L 10 85 Z" 
-                      fill="none" stroke="#333" stroke-width="2"/>
-                <rect x="20" y="42" width="30" height="43" 
-                      fill="url(#sandGradientBottom)" 
-                      style="clip-path: polygon(20px {42 + (1 - bottom_sand_level / 100) * 43}px, 50px {42 + (1 - bottom_sand_level / 100) * 43}px, 50px 85px, 20px 85px);"/>
-                <!-- Gradient definitions -->
-                <defs>
-                    <linearGradient id="sandGradientTop" x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" style="stop-color:#D2B48C;stop-opacity:1" />
-                        <stop offset="100%" style="stop-color:#8B4513;stop-opacity:1" />
-                    </linearGradient>
-                    <linearGradient id="sandGradientBottom" x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" style="stop-color:#8B4513;stop-opacity:1" />
-                        <stop offset="100%" style="stop-color:#D2B48C;stop-opacity:1" />
-                    </linearGradient>
-                </defs>
-            </svg>
-            <div style="flex: 1;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-weight: bold; font-size: 14px;">{message}</span>
-                    <span style="font-weight: bold; font-size: 16px; color: #2563eb;">{percentage}%</span>
-                </div>
-                <div style="width: 100%; height: 24px; background: #e0e0e0; border-radius: 12px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">
-                    <div style="width: {percentage}%; height: 100%; background: linear-gradient(90deg, #8B4513, #A0522D, #CD853F); 
-                                transition: width 0.5s ease; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
-                    </div>
-                </div>
-                <div style="margin-top: 6px; font-size: 12px; color: #666;">
-                    {time_display}
-                </div>
-            </div>
-        </div>
-    </div>
-    """
-    st.markdown(hourglass_html, unsafe_allow_html=True)
 
 
-def run_sniper_with_progress(force: bool = False, headless: bool = True, progress_placeholder=None, status_placeholder=None) -> List[Dict]:
-    """Run scraper with time-based progress updates.
-    
-    Uses estimated average scraping time to show progress based on elapsed time.
-    """
-    # Estimated average time for scraping (in seconds)
-    # This can be updated based on actual measurements
-    ESTIMATED_SCRAPING_TIME = 180  # 3 minutes default, will be updated based on actual runs
-    
-    # Get stored average time if available
-    if 'avg_scraping_time' in st.session_state:
-        ESTIMATED_SCRAPING_TIME = st.session_state['avg_scraping_time']
-    
-    progress_messages = []
-    start_time = time.time()
-    
-    def progress_callback(current, total, message, court_name=None):
-        # Store progress messages
-        progress_messages.append(f"[{current}/{total}] {message}")
-        # Update session state
-        st.session_state['scraper_progress'] = {
-            'current': current,
-            'total': total,
-            'message': message
-        }
-    
-    # Initial progress display
-    if progress_placeholder and status_placeholder:
-        with progress_placeholder.container():
-            render_hourglass_progress(0.0, "Initializing scraper...", 0, ESTIMATED_SCRAPING_TIME)
-        status_placeholder.markdown("**Status:** Starting scraper...")
-    
-    # Use threading to update progress bar while scraper runs
-    import threading
-    
-    stop_progress = threading.Event()
-    progress_thread = None
-    
-    def update_progress():
-        """Update progress bar based on elapsed time."""
-        while not stop_progress.is_set():
-            elapsed = time.time() - start_time
-            # Calculate progress based on elapsed time vs estimated time
-            # Cap at 95% until actually complete
-            progress = min(0.95, elapsed / ESTIMATED_SCRAPING_TIME) if ESTIMATED_SCRAPING_TIME > 0 else 0.5
-            
-            if progress_placeholder and status_placeholder:
-                try:
-                    current_msg = st.session_state.get('scraper_progress', {}).get('message', 'Scraping...')
-                    with progress_placeholder.container():
-                        render_hourglass_progress(progress, current_msg, elapsed, ESTIMATED_SCRAPING_TIME)
-                except Exception:
-                    pass  # Ignore errors during update
-            
-            time.sleep(0.5)  # Update every 0.5 seconds
-    
-    # Start progress update thread
-    if progress_placeholder and status_placeholder:
-        progress_thread = threading.Thread(target=update_progress, daemon=True)
-        progress_thread.start()
-    
-    # Use st.status for better progress display
-    with st.status("Scraping courts...", expanded=True) as status:
-        try:
-            # Run scraper with progress callback
-            data = asyncio.run(scrape_courts(headless=headless, progress_callback=progress_callback))
-            
-            # Stop progress updates
-            stop_progress.set()
-            if progress_thread:
-                progress_thread.join(timeout=1)
-            
-            # Calculate actual elapsed time
-            actual_elapsed = time.time() - start_time
-            
-            # Update average scraping time (exponential moving average)
-            if 'avg_scraping_time' not in st.session_state:
-                st.session_state['avg_scraping_time'] = actual_elapsed
-            else:
-                # EMA: new_avg = 0.7 * old_avg + 0.3 * new_value
-                st.session_state['avg_scraping_time'] = 0.7 * st.session_state['avg_scraping_time'] + 0.3 * actual_elapsed
-            
-            # Show all progress messages
-            for msg in progress_messages:
-                status.write(msg)
-            
-            # Update status
-            status.update(label="✅ Scraping complete!", state="complete")
-            
-            # Final progress display (100%)
-            if progress_placeholder and status_placeholder:
-                with progress_placeholder.container():
-                    render_hourglass_progress(1.0, "Scraping complete!", actual_elapsed, actual_elapsed)
-                status_placeholder.markdown(f"**Status:** ✅ Scraping complete! (took {int(actual_elapsed)}s)")
-        except Exception as e:
-            stop_progress.set()
-            if progress_thread:
-                progress_thread.join(timeout=1)
-            status.update(label=f"❌ Error: {str(e)}", state="error")
-            if progress_placeholder and status_placeholder:
-                status_placeholder.markdown(f"**Status:** ❌ Error: {str(e)}")
-            raise
-    
-    # Save cache and update last run time
-    save_cache(data, DATA_PATH)
-    pacific = pytz.timezone('America/Los_Angeles')
-    st.session_state['last_run_time'] = datetime.now(pacific).strftime('%Y-%m-%d %I:%M:%S %p %Z')
-    
-    return data
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def cached_scrape(headless: bool) -> List[Dict]:
-    return asyncio.run(scrape_courts(headless=headless))
 
 
 def run_sniper(force: bool = False, headless: bool = True) -> tuple[List[Dict], str]:
     """Run scraper and return data with source indicator."""
-    if force:
-        data = cached_scrape.clear()
-        data = cached_scrape(headless)
-    else:
-        data = cached_scrape(headless)
-    save_cache(data, DATA_PATH)
-    # Update last run time
-    pacific = pytz.timezone('America/Los_Angeles')
-    st.session_state['last_run_time'] = datetime.now(pacific).strftime('%Y-%m-%d %I:%M:%S %p %Z')
+    data, source = load_cache()
+    if force or not data:
+        data = asyncio.run(scrape_courts(headless=headless))
+        save_cache(data, DATA_PATH)
+    
+    # Update last run time in PST
+    st.session_state['last_run_time'] = get_pacific_time().strftime('%Y-%m-%d %I:%M:%S %p %Z')
     # Determine data source
     data_source = 'supabase' if get_supabase_client() else 'json'
     return data, data_source
@@ -823,87 +576,24 @@ def main() -> None:
     st.set_page_config(page_title="UBC Tennis Court Sniper", layout="wide")
     st.title("🎾 UBC Tennis Court Sniper")
 
-    sidebar = st.sidebar
-    sidebar.header("Automation")
-    ntfy_enabled = sidebar.checkbox("Enable Ntfy Notifications", value=False)
-    ntfy_topic = sidebar.text_input("ntfy topic", value=os.getenv("NTFY_TOPIC", ""))
-    ntfy_url = sidebar.text_input("ntfy base URL", value=os.getenv("NTFY_URL", "https://ntfy.sh"))
-    headless_default = os.getenv("SCRAPER_HEADLESS", "true").lower() == "true"
-    
     # Initialize session state
     if 'last_run_time' not in st.session_state:
         st.session_state['last_run_time'] = None
-    if 'is_scraping' not in st.session_state:
-        st.session_state['is_scraping'] = False
 
-    if ntfy_enabled and ntfy_topic:
-        if "ntfy_log" not in st.session_state:
-            st.session_state["ntfy_log"] = []
-    else:
-        st.session_state.pop("ntfy_log", None)
-
-    # Display last run time
+    # Load data initially
+    data, data_source = run_sniper(force=False, headless=True)
+    
+    # Display last run time in PST
     if st.session_state.get('last_run_time'):
-        pacific = pytz.timezone('America/Los_Angeles')
-        now = datetime.now(pacific)
-        sidebar.markdown("---")
-        sidebar.markdown(f"**Last Scraped:**\n{st.session_state['last_run_time']}")
-        sidebar.markdown(f"**Current Time (PT):**\n{now.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
-    
-    # Countdown clock
-    sidebar.markdown("---")
-    sidebar.markdown("### ⏰ Auto-Refresh")
-    render_countdown_clock()
+        st.markdown(f"**Last Scraped (PST):** {st.session_state['last_run_time']}")
 
-    data, data_source = load_cache()
-    is_refreshing = False
-    
     # Display data source indicator
     if data_source == 'supabase':
-        sidebar.markdown("---")
-        sidebar.success("✅ Connected to Supabase")
+        st.success("✅ Connected to Supabase")
     elif data_source == 'json':
-        sidebar.markdown("---")
-        sidebar.warning("⚠️ Using JSON file (Supabase unavailable)")
+        st.warning("⚠️ Using JSON file (Supabase unavailable)")
     else:
-        sidebar.markdown("---")
-        sidebar.error("❌ No data available")
-    
-    if st.button("Refresh Now", disabled=st.session_state.get('is_scraping', False)):
-        st.session_state['is_scraping'] = True
-        is_refreshing = True
-        
-        # Create placeholders for progress
-        progress_placeholder = st.empty()
-        status_placeholder = st.empty()
-        
-        try:
-            data = run_sniper_with_progress(
-                force=True, 
-                headless=headless_default,
-                progress_placeholder=progress_placeholder,
-                status_placeholder=status_placeholder
-            )
-            
-            # Reload data to get updated source after scraping
-            data, data_source = load_cache()
-            
-            # Clear progress placeholders
-            progress_placeholder.empty()
-            status_placeholder.empty()
-            
-            if ntfy_enabled and ntfy_topic and data:
-                message = f"Next slot: {data[0].get('time')} @ {data[0].get('court')}"
-                try:
-                    resp = notify_ntfy(ntfy_topic, message, ntfy_url)
-                    st.session_state["ntfy_log"].append(f"{datetime.utcnow().isoformat()}Z: {message} ({resp.status_code})")
-                except Exception as exc:  # pragma: no cover - defensive
-                    st.warning(f"Failed to send notification: {exc}")
-        finally:
-            st.session_state['is_scraping'] = False
-            st.rerun()
-    elif not data:
-        data, data_source = run_sniper(force=False, headless=headless_default)
+        st.error("❌ No data available. Please run scraper.")
 
     render_hero(data)
     
@@ -942,12 +632,7 @@ def main() -> None:
     
     # Full feed (collapsible)
     with st.expander("📋 List View (All Available Slots)"):
-        render_feed(data, ntfy_enabled, ntfy_topic, ntfy_url)
-
-    if ntfy_enabled and st.session_state.get("ntfy_log"):
-        st.sidebar.subheader("Notification Log")
-        for item in st.session_state["ntfy_log"][-10:][::-1]:
-            st.sidebar.write(item)
+        render_feed(data, False, "", "")
     
     # Alerts section
     st.markdown("---")
